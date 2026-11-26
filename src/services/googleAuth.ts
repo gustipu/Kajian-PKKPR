@@ -56,6 +56,18 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      throw new Error('Jendela login Google ditutup sebelum proses selesai. Silakan coba lagi.');
+    }
+    if (code === 'auth/popup-blocked') {
+      throw new Error('Popup login diblokir oleh browser. Izinkan popup untuk situs ini lalu coba lagi.');
+    }
+    if (code === 'auth/unauthorized-domain') {
+      throw new Error('Domain aplikasi belum diizinkan pada Firebase Authentication (Authorized Domains).');
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }

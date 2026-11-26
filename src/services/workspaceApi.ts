@@ -108,6 +108,16 @@ async function googleJson<T>(url: string, options: RequestInit = {}): Promise<T>
   return res.json() as Promise<T>;
 }
 
+export function extractDriveId(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  const match =
+    trimmed.match(/\/d\/([a-zA-Z0-9_-]{10,})/) ||
+    trimmed.match(/\/folders\/([a-zA-Z0-9_-]{10,})/) ||
+    trimmed.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  return match ? match[1] : trimmed;
+}
+
 export async function listDriveItems(
   mimeType: string,
   searchQuery = ''
@@ -119,15 +129,16 @@ export async function listDriveItems(
   }
   const q = encodeURIComponent(clauses.join(' and '));
   const fields = encodeURIComponent('files(id,name,mimeType,modifiedTime,webViewLink)');
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=25&fields=${fields}`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=25&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=${fields}`;
   const data = await googleJson<{ files?: DriveItem[] }>(url);
   return data.files || [];
 }
 
 export async function getDriveItemMetadata(fileId: string): Promise<DriveItem> {
+  const cleanId = extractDriveId(fileId);
   const fields = encodeURIComponent('id,name,mimeType,modifiedTime,webViewLink');
   return googleJson<DriveItem>(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=${fields}`
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?supportsAllDrives=true&fields=${fields}`
   );
 }
 
@@ -210,6 +221,16 @@ export async function fetchDataInduk(spreadsheetId: string): Promise<DataIndukRo
       no_ptp: r[28] || '',
       status_lbs_lsd_hutan_momi: r[29] || '',
     }))
+    .filter((row) =>
+      Boolean(
+        row.timestamp.trim() ||
+          row.nama_perusahaan.trim() ||
+          row.id_proyek.trim() ||
+          row.kode_kbli.trim() ||
+          row.desa.trim() ||
+          row.kecamatan.trim()
+      )
+    )
     .reverse();
 }
 
@@ -300,11 +321,54 @@ async function getImageDimensions(file: File): Promise<{ width: number; height: 
   });
 }
 
+async function normalizeImageForDocs(file: File): Promise<File> {
+  const supported = ['image/png', 'image/jpeg', 'image/gif'];
+  if (supported.includes(file.type.toLowerCase())) {
+    return file;
+  }
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || 800;
+        canvas.height = img.naturalHeight || 500;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          resolve(file);
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(url);
+          if (!blob) {
+            resolve(file);
+            return;
+          }
+          const baseName = file.name.replace(/\.[^.]+$/, '') || 'image';
+          resolve(new File([blob], `${baseName}.png`, { type: 'image/png' }));
+        }, 'image/png');
+      } catch {
+        URL.revokeObjectURL(url);
+        resolve(file);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(file);
+    };
+    img.src = url;
+  });
+}
+
 async function uploadTempImageToDrive(
-  file: File,
+  rawFile: File,
   parentFolderId: string,
   namePrefix: string
 ): Promise<{ fileId: string; imageUrl: string; canInsert: boolean; warning?: string }> {
+  const file = await normalizeImageForDocs(rawFile);
   const token = await requireToken();
   const metadata = {
     name: `_tmp_${namePrefix}_${Date.now()}_${file.name}`,
@@ -316,7 +380,7 @@ async function uploadTempImageToDrive(
   form.append('file', file);
 
   const uploadRes = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webContentLink',
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webContentLink',
     {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
@@ -338,7 +402,7 @@ async function uploadTempImageToDrive(
   // Grant temporary public reader permission so Google Docs server can fetch the inline image
   try {
     const permRes = await googleFetch(
-      `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(uploaded.id)}/permissions?supportsAllDrives=true`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -371,9 +435,12 @@ async function uploadTempImageToDrive(
 
 async function deleteDriveFileQuietly(fileId: string): Promise<void> {
   try {
-    await googleFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-      method: 'DELETE',
-    });
+    await googleFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+      {
+        method: 'DELETE',
+      }
+    );
   } catch {
     // Non-critical cleanup failure
   }
@@ -426,9 +493,18 @@ function collectPlaceholdersFromElements(
         }
       }
 
-      const toDocIndex = (textIdx: number): number | null => {
+      const toDocStartIndex = (textIdx: number): number | null => {
         for (const r of runOffsets) {
-          if (textIdx >= r.textStart && textIdx <= r.textStart + r.length) {
+          if (textIdx >= r.textStart && textIdx < r.textStart + r.length) {
+            return r.docStart + (textIdx - r.textStart);
+          }
+        }
+        return null;
+      };
+
+      const toDocEndIndex = (textIdx: number): number | null => {
+        for (const r of runOffsets) {
+          if (textIdx > r.textStart && textIdx <= r.textStart + r.length) {
             return r.docStart + (textIdx - r.textStart);
           }
         }
@@ -440,8 +516,8 @@ function collectPlaceholdersFromElements(
         while (searchFrom < fullText.length) {
           const foundAt = fullText.indexOf(target, searchFrom);
           if (foundAt === -1) break;
-          const docStart = toDocIndex(foundAt);
-          const docEnd = toDocIndex(foundAt + target.length);
+          const docStart = toDocStartIndex(foundAt);
+          const docEnd = toDocEndIndex(foundAt + target.length);
           if (docStart !== null && docEnd !== null) {
             matches.push({
               placeholder: target,
@@ -1105,21 +1181,23 @@ export async function populateFormattedTemplateDoc(docId: string): Promise<void>
     const pEnd = isLast ? cursor + 1 : cursor;
 
     const pStyle: Record<string, unknown> = {
+      namedStyleType: 'NORMAL_TEXT',
       alignment: p.alignment || 'JUSTIFIED',
       lineSpacing: p.lineSpacing || 115,
       spaceAbove: { magnitude: p.spaceAbove ?? 0, unit: 'PT' },
       spaceBelow: { magnitude: p.spaceBelow ?? 2, unit: 'PT' },
+      indentStart: { magnitude: p.indentStart ?? 0, unit: 'PT' },
+      indentFirstLine: { magnitude: p.indentFirstLine ?? 0, unit: 'PT' },
     };
-    const pFields = ['alignment', 'lineSpacing', 'spaceAbove', 'spaceBelow'];
-
-    if (typeof p.indentStart === 'number') {
-      pStyle.indentStart = { magnitude: p.indentStart, unit: 'PT' };
-      pFields.push('indentStart');
-    }
-    if (typeof p.indentFirstLine === 'number') {
-      pStyle.indentFirstLine = { magnitude: p.indentFirstLine, unit: 'PT' };
-      pFields.push('indentFirstLine');
-    }
+    const pFields = [
+      'namedStyleType',
+      'alignment',
+      'lineSpacing',
+      'spaceAbove',
+      'spaceBelow',
+      'indentStart',
+      'indentFirstLine',
+    ];
 
     paraStyleRequests.push({
       updateParagraphStyle: {
@@ -1316,6 +1394,28 @@ export async function populateFormattedTemplateDoc(docId: string): Promise<void>
   }
 }
 
+function parseIndoNumber(val: string): number | null {
+  const cleaned = val.trim().replace(/\s+/g, '');
+  if (!cleaned) return null;
+  // Support "1.255,80" (Indonesian format) and "1255.8"
+  const normalized =
+    cleaned.includes(',')
+      ? cleaned.replace(/\./g, '').replace(',', '.')
+      : /^\d{1,3}(\.\d{3})+$/.test(cleaned)
+        ? cleaned.replace(/\./g, '')
+        : cleaned;
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatIndoNumber(num: number): string {
+  const rounded = Math.round(num * 100) / 100;
+  return rounded.toLocaleString('id-ID', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  });
+}
+
 export async function generateKajianAndSave(
   config: WorkspaceConfig,
   formData: KajianFormData,
@@ -1350,11 +1450,30 @@ export async function generateKajianAndSave(
     const matchKab2 = masterZona.kab.find((r) => r.namaZona === formData.zona_kab_2);
     if (matchKab2) {
       teksKuzKab += (teksKuzKab ? '\n\n' : '') + matchKab2.isiKuz;
+      const kdb2 = matchKab2.kdb || '-';
+      const klb2 = matchKab2.klb || '-';
+      const kdh2 = matchKab2.kdh || '-';
+      if (kdb2 !== kdb && matchKab1) {
+        kdb = `${kdb} (${matchKab1.namaZona}) / ${kdb2} (${matchKab2.namaZona})`;
+      }
+      if (klb2 !== klb && matchKab1) {
+        klb = `${klb} (${matchKab1.namaZona}) / ${klb2} (${matchKab2.namaZona})`;
+      }
+      if (kdh2 !== kdh && matchKab1) {
+        kdh = `${kdh} (${matchKab1.namaZona}) / ${kdh2} (${matchKab2.namaZona})`;
+      }
     }
-    luasKabTotal = formData.luas_permohonan || formData.luas_kab_1 || '-';
-    const p1 = parseFloat((formData.persen_kab_1 || '0').replace(',', '.')) || 0;
-    const p2 = parseFloat((formData.persen_kab_2 || '0').replace(',', '.')) || 0;
-    persenKabTotal = p1 + p2 > 0 ? String(p1 + p2) : '100';
+    const l1 = parseIndoNumber(formData.luas_kab_1);
+    const l2 = parseIndoNumber(formData.luas_kab_2);
+    if (l1 !== null && l2 !== null) {
+      luasKabTotal = formatIndoNumber(l1 + l2);
+    } else {
+      luasKabTotal = formData.luas_permohonan || formData.luas_kab_1 || '-';
+    }
+
+    const p1 = parseIndoNumber(formData.persen_kab_1) ?? 0;
+    const p2 = parseIndoNumber(formData.persen_kab_2) ?? 0;
+    persenKabTotal = p1 + p2 > 0 ? formatIndoNumber(p1 + p2) : '100';
   }
 
   const zonaKabDisplay = formData.zona_kab_2
@@ -1371,62 +1490,12 @@ export async function generateKajianAndSave(
     teksKuzProv = matchProv.isiKuz;
   }
 
-  // 3. Append row to Google Sheets Data_Induk (A:AD, 30 columns)
-  const timestamp = new Date().toLocaleString('id-ID', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
-  const statusGabungan = `LBS: ${formData.status_lbs} | LSD: ${formData.status_lsd} | LP2B: ${formData.status_lp2b} | Hutan: ${formData.status_hutan} | MOMI: ${formData.status_momi}`;
-
-  const rowValues = [
-    timestamp,
-    formData.jenis_kkpr,
-    formData.kategori_usaha,
-    formData.jalur,
-    formData.nama_perusahaan,
-    formData.kode_kbli,
-    formData.judul_kbli,
-    formData.penjelasan_kbli,
-    formData.tgl_oss,
-    formData.tgl_validasi,
-    formData.tgl_pnbp,
-    formData.tgl_ptp,
-    formData.tgl_unggah_ptp,
-    formData.id_proyek,
-    formData.desa,
-    formData.kecamatan,
-    formData.luas_permohonan,
-    formData.status_modal,
-    formData.status_poligon,
-    formData.zona_kab_1,
-    formData.luas_kab_1,
-    formData.persen_kab_1,
-    formData.zona_kab_2,
-    formData.luas_kab_2,
-    formData.persen_kab_2,
-    formData.zona_prov,
-    formData.luas_prov,
-    formData.persen_prov,
-    formData.no_ptp,
-    statusGabungan,
-  ];
-
-  await googleJson(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-      config.spreadsheetId
-    )}/values/${encodeURIComponent('Data_Induk!A:AD')}:append?valueInputOption=USER_ENTERED`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ values: [rowValues] }),
-    }
-  );
-
-  // 4. Copy Template Google Docs into Output Folder
+  // 3. Copy Template Google Docs into Output Folder
   const namaFileBaru = `Kajian PKKPR - ${formData.nama_perusahaan.trim()}`;
   const copiedFile = await googleJson<{ id: string; webViewLink?: string }>(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
       config.templateDocId
-    )}/copy?fields=id,webViewLink`,
+    )}/copy?supportsAllDrives=true&fields=id,webViewLink`,
     {
       method: 'POST',
       body: JSON.stringify({
@@ -1437,8 +1506,9 @@ export async function generateKajianAndSave(
   );
 
   const docId = copiedFile.id;
+  const encodedDocId = encodeURIComponent(docId);
 
-  // 5. Replace all text placeholders (PDF-aligned + legacy compatibility)
+  // 4. Replace all text placeholders (PDF-aligned + legacy compatibility)
   const defaultRekomendasi = `disetujui seluruhnya seluas ± ${
     formData.luas_permohonan || '-'
   } m² melalui ${formData.jenis_kkpr} KKPR`;
@@ -1513,12 +1583,12 @@ export async function generateKajianAndSave(
     },
   }));
 
-  await googleJson(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
+  await googleJson(`https://docs.googleapis.com/v1/documents/${encodedDocId}:batchUpdate`, {
     method: 'POST',
     body: JSON.stringify({ requests: textRequests }),
   });
 
-  // 6. Upload & insert any provided images into {{img_*}} placeholders
+  // 5. Upload & insert any provided images into {{img_*}} placeholders
   const imageSlots: Array<{ placeholder: string; file: File | null; label: string }> = [
     { placeholder: '{{img_validasi}}', file: formData.img_validasi, label: 'Akun OSS' },
     { placeholder: '{{img_peta_kab}}', file: formData.img_peta_kab, label: 'Peta Kab. Pasuruan' },
@@ -1527,12 +1597,14 @@ export async function generateKajianAndSave(
   ];
 
   const uploadedTempIds: string[] = [];
+  const slotLabelByPlaceholder: Record<string, string> = {};
   const preparedImages: Record<
     string,
     { imageUrl: string; widthPt: number; heightPt: number } | null
   > = {};
 
   for (const slot of imageSlots) {
+    slotLabelByPlaceholder[slot.placeholder] = slot.label;
     if (!slot.file) {
       preparedImages[slot.placeholder] = null;
       continue;
@@ -1558,71 +1630,151 @@ export async function generateKajianAndSave(
   }
 
   try {
-    const docData = await googleJson<{ body?: { content?: DocsElement[] } }>(
-      `https://docs.googleapis.com/v1/documents/${docId}`
-    );
-    const matches: PlaceholderMatch[] = [];
-    collectPlaceholdersFromElements(
-      docData.body?.content || [],
-      imageSlots.map((s) => s.placeholder),
-      matches
-    );
-
-    // Sort descending by startIndex so deletions/insertions don't shift earlier offsets
-    matches.sort((a, b) => b.startIndex - a.startIndex);
-
-    const imageRequests: unknown[] = [];
-    for (const m of matches) {
-      imageRequests.push({
-        deleteContentRange: {
-          range: {
-            startIndex: m.startIndex,
-            endIndex: m.endIndex,
-          },
+    // First remove placeholders that have no image to insert
+    const clearEmptyRequests = imageSlots
+      .filter((s) => !preparedImages[s.placeholder])
+      .map((s) => ({
+        replaceAllText: {
+          containsText: { text: s.placeholder, matchCase: true },
+          replaceText: '',
         },
+      }));
+    if (clearEmptyRequests.length > 0) {
+      await googleJson(`https://docs.googleapis.com/v1/documents/${encodedDocId}:batchUpdate`, {
+        method: 'POST',
+        body: JSON.stringify({ requests: clearEmptyRequests }),
       });
-      const imgInfo = preparedImages[m.placeholder];
-      if (imgInfo) {
-        imageRequests.push({
-          insertInlineImage: {
-            location: { index: m.startIndex },
-            uri: imgInfo.imageUrl,
-            objectSize: {
-              width: { magnitude: imgInfo.widthPt, unit: 'PT' },
-              height: { magnitude: imgInfo.heightPt, unit: 'PT' },
-            },
-          },
-        });
-      }
     }
 
-    if (imageRequests.length > 0) {
-      try {
-        await googleJson(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
-          method: 'POST',
-          body: JSON.stringify({ requests: imageRequests }),
-        });
-      } catch (imgErr) {
-        // Fallback: clear placeholders cleanly if Docs server couldn't fetch external URL
-        warnings.push(
-          `Sebagian gambar tidak dapat disisipkan otomatis ke Google Docs (${
-            imgErr instanceof Error ? imgErr.message : 'akses gambar'
-          }). Anda dapat menyisipkannya manual melalui tautan Edit Google Docs.`
-        );
-        const clearRequests = imageSlots.map((s) => ({
-          replaceAllText: {
-            containsText: { text: s.placeholder, matchCase: true },
-            replaceText: '[Lampiran Gambar - Sisipkan di Google Docs]',
-          },
-        }));
-        await googleJson(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
-          method: 'POST',
-          body: JSON.stringify({ requests: clearRequests }),
-        });
+    const activePlaceholders = imageSlots
+      .filter((s) => Boolean(preparedImages[s.placeholder]))
+      .map((s) => s.placeholder);
+
+    if (activePlaceholders.length > 0) {
+      const docData = await googleJson<{ body?: { content?: DocsElement[] } }>(
+        `https://docs.googleapis.com/v1/documents/${encodedDocId}`
+      );
+      const matches: PlaceholderMatch[] = [];
+      collectPlaceholdersFromElements(
+        docData.body?.content || [],
+        activePlaceholders,
+        matches
+      );
+
+      // Process in reverse document order so earlier indices stay valid even if one slot falls back
+      matches.sort((a, b) => b.startIndex - a.startIndex);
+
+      for (const m of matches) {
+        const imgInfo = preparedImages[m.placeholder];
+        if (!imgInfo) continue;
+        try {
+          await googleJson(`https://docs.googleapis.com/v1/documents/${encodedDocId}:batchUpdate`, {
+            method: 'POST',
+            body: JSON.stringify({
+              requests: [
+                {
+                  deleteContentRange: {
+                    range: { startIndex: m.startIndex, endIndex: m.endIndex },
+                  },
+                },
+                {
+                  insertInlineImage: {
+                    location: { index: m.startIndex },
+                    uri: imgInfo.imageUrl,
+                    objectSize: {
+                      width: { magnitude: imgInfo.widthPt, unit: 'PT' },
+                      height: { magnitude: imgInfo.heightPt, unit: 'PT' },
+                    },
+                  },
+                },
+              ],
+            }),
+          });
+        } catch (imgErr) {
+          const label = slotLabelByPlaceholder[m.placeholder] || m.placeholder;
+          warnings.push(
+            `Gambar "${label}" tidak dapat disisipkan otomatis ke Google Docs (${
+              imgErr instanceof Error ? imgErr.message : 'akses gambar'
+            }). Anda dapat menyisipkannya manual melalui tautan Edit Google Docs.`
+          );
+          await googleJson(`https://docs.googleapis.com/v1/documents/${encodedDocId}:batchUpdate`, {
+            method: 'POST',
+            body: JSON.stringify({
+              requests: [
+                {
+                  replaceAllText: {
+                    containsText: { text: m.placeholder, matchCase: true },
+                    replaceText: `[Lampiran Gambar ${label} - Sisipkan di Google Docs]`,
+                  },
+                },
+              ],
+            }),
+          });
+        }
       }
     }
   } finally {
     await Promise.all(uploadedTempIds.map((id) => deleteDriveFileQuietly(id)));
+  }
+
+  // 6. Append row to Google Sheets Data_Induk (A:AD, 30 columns) after Docs succeeds
+  const timestamp = new Date().toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+  const statusGabungan = `LBS: ${formData.status_lbs} | LSD: ${formData.status_lsd} | LP2B: ${formData.status_lp2b} | Hutan: ${formData.status_hutan} | MOMI: ${formData.status_momi}`;
+
+  const rowValues = [
+    timestamp,
+    formData.jenis_kkpr,
+    formData.kategori_usaha,
+    formData.jalur,
+    formData.nama_perusahaan,
+    formData.kode_kbli,
+    formData.judul_kbli,
+    formData.penjelasan_kbli,
+    formData.tgl_oss,
+    formData.tgl_validasi,
+    formData.tgl_pnbp,
+    formData.tgl_ptp,
+    formData.tgl_unggah_ptp,
+    formData.id_proyek,
+    formData.desa,
+    formData.kecamatan,
+    formData.luas_permohonan,
+    formData.status_modal,
+    formData.status_poligon,
+    formData.zona_kab_1,
+    formData.luas_kab_1,
+    formData.persen_kab_1,
+    formData.zona_kab_2,
+    formData.luas_kab_2,
+    formData.persen_kab_2,
+    formData.zona_prov,
+    formData.luas_prov,
+    formData.persen_prov,
+    formData.no_ptp,
+    statusGabungan,
+  ];
+
+  let sheetRowUpdated = true;
+  try {
+    await googleJson(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+        config.spreadsheetId
+      )}/values/${encodeURIComponent('Data_Induk!A:AD')}:append?valueInputOption=USER_ENTERED`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ values: [rowValues] }),
+      }
+    );
+  } catch (sheetErr) {
+    sheetRowUpdated = false;
+    warnings.push(
+      `Dokumen Google Docs berhasil dibuat, tetapi gagal mencatat baris ke Data_Induk (${
+        sheetErr instanceof Error ? sheetErr.message : 'Sheets API error'
+      }).`
+    );
   }
 
   // 7. Export final document as .DOCX blob directly using authenticated fetch
@@ -1630,7 +1782,7 @@ export async function generateKajianAndSave(
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   );
   const exportRes = await googleFetch(
-    `https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=${exportMime}`
+    `https://www.googleapis.com/drive/v3/files/${encodedDocId}/export?mimeType=${exportMime}`
   );
   if (!exportRes.ok) {
     throw new Error(`Dokumen tersimpan di Google Docs, tetapi gagal ekspor .docx (${exportRes.status}).`);
@@ -1643,7 +1795,7 @@ export async function generateKajianAndSave(
     fileName: `${namaFileBaru}.docx`,
     urlEdit: copiedFile.webViewLink || `https://docs.google.com/document/d/${docId}/edit`,
     docxBlobUrl,
-    sheetRowUpdated: true,
+    sheetRowUpdated,
     warnings,
   };
 }
@@ -1691,9 +1843,15 @@ export async function bootstrapWorkspaceFiles(): Promise<WorkspaceConfig> {
 
   const spreadsheetId = spreadsheet.spreadsheetId;
 
-  // Move Spreadsheet into mainFolder
+  // Move Spreadsheet into mainFolder cleanly
+  const ssMeta = await googleJson<{ parents?: string[] }>(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(spreadsheetId)}?fields=parents&supportsAllDrives=true`
+  );
+  const removeParentsParam = ssMeta.parents?.length
+    ? `&removeParents=${encodeURIComponent(ssMeta.parents.join(','))}`
+    : '';
   await googleJson(
-    `https://www.googleapis.com/drive/v3/files/${spreadsheetId}?addParents=${mainFolder.id}&fields=id`,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(spreadsheetId)}?addParents=${encodeURIComponent(mainFolder.id)}${removeParentsParam}&supportsAllDrives=true&fields=id`,
     { method: 'PATCH', body: JSON.stringify({}) }
   );
 
@@ -1748,7 +1906,8 @@ export function getPublicAppUrl(): string {
   if (typeof window === 'undefined') {
     return 'https://ais-pre-uvzg27nyvsnb3dgim7qh4g-1018282165679.asia-east1.run.app';
   }
-  return window.location.origin.replace('ais-dev-', 'ais-pre-');
+  const basePath = window.location.pathname.replace(/\/$/, '');
+  return `${window.location.origin.replace('ais-dev-', 'ais-pre-')}${basePath}`;
 }
 
 export function buildTeamShareUrl(config: WorkspaceConfig): string {
