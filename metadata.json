@@ -1,0 +1,6 @@
+{
+  "name": "Generator Kajian PKKPR — DCKTR Kab. Pasuruan",
+  "description": "Aplikasi web terintegrasi Google Workspace untuk penyusunan Kajian PKKPR, manajemen Bank KUZ RTRW Kab. Pasuruan & Prov. Jatim, serta ekspor dokumen .docx dan rekap Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
