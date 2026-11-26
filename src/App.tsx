@@ -75,22 +75,20 @@ function loadSavedConfig(): WorkspaceConfig | null {
 }
 
 export default function App() {
+  const [initialTeamLink] = useState<boolean>(() => hasTeamLinkParams());
+  const [config, setConfig] = useState<WorkspaceConfig | null>(() => loadSavedConfig());
   const [user, setUser] = useState<User | null>(null);
   const [needsAuth, setNeedsAuth] = useState<boolean>(true);
   const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
   const [authNotice, setAuthNotice] = useState<string | null>(() =>
-    hasTeamLinkParams()
+    initialTeamLink
       ? 'Anda membuka tautan kolaborasi tim. Silakan masuk dengan akun Google yang telah diberi akses Drive bersama.'
       : null
   );
 
-  const [activeView, setActiveView] = useState<NavView>(() =>
-    loadSavedConfig() ? 'form' : 'setup'
-  );
+  const [activeView, setActiveView] = useState<NavView>(() => (config ? 'form' : 'setup'));
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [shareModalOpen, setShareModalOpen] = useState(false);
-
-  const [config, setConfig] = useState<WorkspaceConfig | null>(() => loadSavedConfig());
   const [masterZona, setMasterZona] = useState<MasterZonaData>({ kab: [], prov: [] });
   const [dataInduk, setDataInduk] = useState<DataIndukRow[]>([]);
   const [loadingZona, setLoadingZona] = useState(false);
@@ -98,6 +96,13 @@ export default function App() {
   const [dataError, setDataError] = useState<string | null>(null);
 
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+
+  useEffect(() => {
+    if (initialTeamLink && typeof window !== 'undefined') {
+      const cleanUrl = `${window.location.pathname}${window.location.hash}`;
+      window.history.replaceState(null, '', cleanUrl || '/');
+    }
+  }, [initialTeamLink]);
 
   useEffect(() => {
     const unsubscribe = initAuth(
