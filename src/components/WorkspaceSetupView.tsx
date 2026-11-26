@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   ExternalLink,
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import {
   bootstrapWorkspaceFiles,
+  extractDriveId,
   getDriveItemMetadata,
   listDriveItems,
   populateFormattedTemplateDoc,
@@ -52,6 +53,16 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
   );
+
+  useEffect(() => {
+    if (!config) return;
+    setSpreadsheetId(config.spreadsheetId || '');
+    setSpreadsheetName(config.spreadsheetName || '');
+    setTemplateDocId(config.templateDocId || '');
+    setTemplateDocName(config.templateDocName || '');
+    setOutputFolderId(config.outputFolderId || '');
+    setOutputFolderName(config.outputFolderName || '');
+  }, [config]);
 
   const openPicker = async (target: PickerTarget) => {
     if (!target) return;
@@ -98,7 +109,10 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
 
   const handleManualSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!spreadsheetId.trim() || !templateDocId.trim() || !outputFolderId.trim()) {
+    const cleanSsId = extractDriveId(spreadsheetId);
+    const cleanDocId = extractDriveId(templateDocId);
+    const cleanFolderId = extractDriveId(outputFolderId);
+    if (!cleanSsId || !cleanDocId || !cleanFolderId) {
       setStatusMsg({
         type: 'error',
         text: 'Ketiga ID (Master Google Sheets, Template Google Docs, dan Folder Output) wajib diisi.',
@@ -109,9 +123,9 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
     setStatusMsg(null);
     try {
       const [ssMeta, docMeta, folderMeta] = await Promise.all([
-        getDriveItemMetadata(spreadsheetId.trim()),
-        getDriveItemMetadata(templateDocId.trim()),
-        getDriveItemMetadata(outputFolderId.trim()),
+        getDriveItemMetadata(cleanSsId),
+        getDriveItemMetadata(cleanDocId),
+        getDriveItemMetadata(cleanFolderId),
       ]);
       const next: WorkspaceConfig = {
         spreadsheetId: ssMeta.id,
@@ -121,8 +135,11 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
         outputFolderId: folderMeta.id,
         outputFolderName: folderMeta.name,
       };
+      setSpreadsheetId(ssMeta.id);
       setSpreadsheetName(ssMeta.name);
+      setTemplateDocId(docMeta.id);
       setTemplateDocName(docMeta.name);
+      setOutputFolderId(folderMeta.id);
       setOutputFolderName(folderMeta.name);
       onSaveConfig(next);
       setStatusMsg({
@@ -187,7 +204,7 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
   };
 
   const handleFormatTemplateClick = () => {
-    const targetDocId = config?.templateDocId || templateDocId.trim();
+    const targetDocId = extractDriveId(config?.templateDocId || templateDocId);
     if (!targetDocId) return;
 
     onRequestConfirm({
@@ -310,7 +327,7 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
               </span>
               {spreadsheetId && (
                 <a
-                  href={`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`}
+                  href={`https://docs.google.com/spreadsheets/d/${extractDriveId(spreadsheetId)}/edit`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-normal text-blue-800 hover:underline"
@@ -352,7 +369,7 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
               </span>
               {templateDocId && (
                 <a
-                  href={`https://docs.google.com/document/d/${templateDocId}/edit`}
+                  href={`https://docs.google.com/document/d/${extractDriveId(templateDocId)}/edit`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-normal text-blue-800 hover:underline"
@@ -394,7 +411,7 @@ export const WorkspaceSetupView: React.FC<WorkspaceSetupViewProps> = ({
               </span>
               {outputFolderId && (
                 <a
-                  href={`https://drive.google.com/drive/folders/${outputFolderId}`}
+                  href={`https://drive.google.com/drive/folders/${extractDriveId(outputFolderId)}`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-normal text-blue-800 hover:underline"

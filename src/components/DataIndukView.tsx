@@ -23,7 +23,12 @@ export const DataIndukView: React.FC<DataIndukViewProps> = ({
 
   const filtered = useMemo(() => {
     return rows.filter((r) => {
-      if (jenisFilter !== 'all' && r.jenis_kkpr !== jenisFilter) return false;
+      if (
+        jenisFilter !== 'all' &&
+        r.jenis_kkpr.trim().toLowerCase() !== jenisFilter.toLowerCase()
+      ) {
+        return false;
+      }
       if (!search.trim()) return true;
       const q = search.toLowerCase();
       return (
@@ -251,9 +256,9 @@ export const DataIndukView: React.FC<DataIndukViewProps> = ({
                 ['Status Poligon', selectedRow.status_poligon],
                 ['Tgl OSS / Validasi', `${selectedRow.tgl_oss || '-'} / ${selectedRow.tgl_validasi || '-'}`],
                 ['Tgl PNBP / PTP / Unggah', `${selectedRow.tgl_pnbp || '-'} / ${selectedRow.tgl_ptp || '-'} / ${selectedRow.tgl_unggah_ptp || '-'}`],
-                ['Zona Kab. 1', `${selectedRow.zona_kab_1} (${selectedRow.luas_kab_1} m² / ${selectedRow.persen_kab_1}%)`],
-                ['Zona Kab. 2', selectedRow.zona_kab_2 ? `${selectedRow.zona_kab_2} (${selectedRow.luas_kab_2} m² / ${selectedRow.persen_kab_2}%)` : '-'],
-                ['Zona Prov. Jatim', `${selectedRow.zona_prov} (${selectedRow.luas_prov} m² / ${selectedRow.persen_prov}%)`],
+                ['Zona Kab. 1', selectedRow.zona_kab_1 ? `${selectedRow.zona_kab_1} (${selectedRow.luas_kab_1 || '-'} m² / ${selectedRow.persen_kab_1 || '0'}%)` : '-'],
+                ['Zona Kab. 2', selectedRow.zona_kab_2 ? `${selectedRow.zona_kab_2} (${selectedRow.luas_kab_2 || '-'} m² / ${selectedRow.persen_kab_2 || '0'}%)` : '-'],
+                ['Zona Prov. Jatim', selectedRow.zona_prov ? `${selectedRow.zona_prov} (${selectedRow.luas_prov || '-'} m² / ${selectedRow.persen_prov || '0'}%)` : '-'],
                 ['Nomor PTP', selectedRow.no_ptp || '-'],
                 ['Status LBS | LSD | Hutan | MOMI', selectedRow.status_lbs_lsd_hutan_momi || '-'],
               ].map(([label, val]) => (

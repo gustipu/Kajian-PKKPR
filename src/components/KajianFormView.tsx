@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -68,8 +68,8 @@ const createInitialForm = (masterZona: MasterZonaData): KajianFormData => ({
   zona_prov: pickDefaultProv(masterZona.prov),
   luas_prov: '',
   persen_prov: '100',
-  status_lbs: 'Tidak masuk',
-  status_lsd: 'Tidak masuk',
+  status_lbs: 'tidak masuk',
+  status_lsd: 'tidak masuk',
   no_ptp: '',
   tgl_ptp_surat: '',
   luas_ptp: '',
@@ -119,21 +119,33 @@ export const KajianFormView: React.FC<KajianFormViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [result, setResult] = useState<GeneratedKajianResult | null>(null);
 
+  const previewsRef = useRef<Record<string, string>>({});
+  previewsRef.current = previews;
+  const resultUrlRef = useRef<string | null>(null);
+  resultUrlRef.current = result?.docxBlobUrl || null;
+
   // Sync default zona selections once effectiveMasterZona loads
   useEffect(() => {
-    setFormData((prev) => ({
-      ...prev,
-      zona_kab_1: prev.zona_kab_1 || pickDefaultKab(effectiveMasterZona.kab),
-      zona_prov: prev.zona_prov || pickDefaultProv(effectiveMasterZona.prov),
-    }));
+    setFormData((prev) => {
+      const kabValid = effectiveMasterZona.kab.some((z) => z.namaZona === prev.zona_kab_1);
+      const provValid = effectiveMasterZona.prov.some((z) => z.namaZona === prev.zona_prov);
+      return {
+        ...prev,
+        zona_kab_1: kabValid ? prev.zona_kab_1 : pickDefaultKab(effectiveMasterZona.kab),
+        zona_prov: provValid ? prev.zona_prov : pickDefaultProv(effectiveMasterZona.prov),
+      };
+    });
   }, [effectiveMasterZona]);
 
-  // Revoke object URLs on unmount
+  // Revoke object URLs only on unmount
   useEffect(() => {
     return () => {
-      Object.values(previews).forEach((url) => URL.revokeObjectURL(url));
+      Object.values(previewsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      if (resultUrlRef.current) {
+        URL.revokeObjectURL(resultUrlRef.current);
+      }
     };
-  }, [previews]);
+  }, []);
 
   const setField = <K extends keyof KajianFormData>(key: K, value: KajianFormData[K]) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
@@ -221,6 +233,9 @@ export const KajianFormView: React.FC<KajianFormViewProps> = ({
 
   const handleReset = () => {
     Object.values(previews).forEach((url) => URL.revokeObjectURL(url));
+    if (result?.docxBlobUrl) {
+      URL.revokeObjectURL(result.docxBlobUrl);
+    }
     setPreviews({});
     setFormData(createInitialForm(effectiveMasterZona));
     setResult(null);
@@ -275,7 +290,12 @@ export const KajianFormView: React.FC<KajianFormViewProps> = ({
         setErrorMsg(null);
         try {
           const generated = await generateKajianAndSave(config, formData, effectiveMasterZona);
-          setResult(generated);
+          setResult((prev) => {
+            if (prev?.docxBlobUrl) {
+              URL.revokeObjectURL(prev.docxBlobUrl);
+            }
+            return generated;
+          });
           onSuccessSaved();
         } catch (err) {
           onAuthError(err);
@@ -1184,6 +1204,14 @@ export const KajianFormView: React.FC<KajianFormViewProps> = ({
                   </span>
                 </div>
               </div>
+              {selectedKab2 &&
+                (selectedKab2.kdb !== selectedKab1?.kdb ||
+                  selectedKab2.klb !== selectedKab1?.klb ||
+                  selectedKab2.kdh !== selectedKab1?.kdh) && (
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    Zona 2 ({selectedKab2.namaZona}): KDB {selectedKab2.kdb} · KLB {selectedKab2.klb} · KDH {selectedKab2.kdh}
+                  </p>
+                )}
             </div>
 
             <div className="border-t border-slate-100 pt-3">
